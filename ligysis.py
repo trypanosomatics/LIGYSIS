@@ -525,11 +525,15 @@ def intersection_rel(l1, l2):
     I = len(list(set(l1).intersection(l2)))
     return I/I_max
 
-def download_and_move_files(pdb_ids, asymmetric_dir, bio=False, OVERRIDE_PDB=False):
+def download_and_move_files(pdb_ids, asymmetric_dir, bio=False, OVERRIDE_PDB=False, failed=None):
     """
     Downloads CIF of a series of PDB IDs and moves
     them to a given directory. If OVERRIDE_PDB is True,
     any existing file will be deleted before the download.
+    PDB IDs whose file cannot be retrieved (e.g., PDBe does not
+    provide assembly files for many recent entries) are skipped and,
+    if a list is passed as failed, appended to it. Only the paths of
+    the files that are available are returned.
     """
     cifs = []
     for pdb_id in pdb_ids:
@@ -549,8 +553,14 @@ def download_and_move_files(pdb_ids, asymmetric_dir, bio=False, OVERRIDE_PDB=Fal
         
         # If the file does not exist, proceed to download and move
         if not file_exists:
-            download_structure_from_pdbe(pdb_id, bio=bio)
-            shutil.move(cif_in, cif_out)
+            try:
+                download_structure_from_pdbe(pdb_id, bio=bio)
+                shutil.move(cif_in, cif_out)
+            except (OSError, shutil.Error) as e: # ProIntVar fails silently on HTTP errors, and then crashes when decompressing the missing file
+                log.warning("Could not retrieve {} for {}: {}".format("assembly" if bio else "CIF", pdb_id, e))
+                if failed is not None:
+                    failed.append(pdb_id)
+                continue
         else:
             log.debug(f"{cif_out} already exists!")
         
@@ -1866,6 +1876,22 @@ def main(args):
 
                 pdb_ids = [pdb_id for pdb_id in pdb_ids if pdb_id not in ids2remove] # now only desired experimental method and resolution are kept
                 
+            ### REMOVING STRUCTURES FOR WHICH PDBe DOES NOT PROVIDE THE ASSEMBLY (OR CIF) FILE. THIS IS THE CASE FOR MANY RECENT ENTRIES.
+
+            no_file_pdbs = []
+            for dl_dir, dl_bio in [(ASSEMBLY_FOLDER, True), (ASYM_FOLDER, False)]:
+                download_and_move_files(sorted(set(pdb_ids)), dl_dir, bio = dl_bio, OVERRIDE_PDB = OVERRIDE_PDB, failed = no_file_pdbs)
+            no_file_pdbs = sorted(set(no_file_pdbs))
+            no_file_out = os.path.join(results_dir, "{}_{}_{}_{}_no_file_pdbs.pkl".format(acc, str(segment), experimental_methods, str(resolution)))
+            dump_pickle(no_file_pdbs, no_file_out)
+            if no_file_pdbs:
+                log.warning("{} structures were excluded for Segment {} of {} because PDBe did not provide their assembly or CIF file: {}".format(len(no_file_pdbs), str(segment), acc, ", ".join(no_file_pdbs)))
+                pdb_ids = [pdb_id for pdb_id in pdb_ids if pdb_id not in no_file_pdbs]
+                if pdb_ids == []:
+                    log.warning("None of the structures has an assembly file for Segment {} of {}".format(str(segment), acc))
+                    print("{}\t{}".format(seg_id, str(21)), flush = True)
+                    continue
+
             unique_pdbs = list(set(pdb_ids)) # this is to avoid querying the same pdb multiple times
 
             log.info("Segment {} of {} presents {} high quality structures".format(str(segment), acc, str(len(unique_pdbs))))     
@@ -2349,6 +2375,10 @@ def main(args):
                 mapped_data.to_pickle(shenkin_mapped_out)
             else:
                 mapped_data = pd.read_pickle(shenkin_mapped_out)
+            # Variant columns are only created if the MSA includes human sequences with missense variants; add them empty otherwise (e.g., non-human proteins without human homologs), so that the summary tables can still be generated
+            for var_col in ["human_shenkin", "human_occ", "human_gaps", "human_occ_pct", "human_gaps_pct", "variants", "oddsratio", "pvalue", "se_OR"]:
+                if var_col not in mapped_data.columns:
+                    mapped_data[var_col] = np.nan
             log.info("Conservation + variant data obtained for Segment {} of {}".format(str(segment), acc))
 
             #### VARIATION SECTION FINISHES ####
