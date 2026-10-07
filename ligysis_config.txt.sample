@@ -1,0 +1,26 @@
+### LIGYSIS CONFIG FILE ###
+### Copy to ligysis_config.txt (git-ignored) and edit the paths for your system.
+
+[paths]
+
+## BINARIES
+
+# python and pdbe-arpeggio of the ARPEGGIO environment (patched, see INSTALL.md)
+arpeggio_python_bin = /path/to/conda/envs/ARPEGGIO/bin/python
+arpeggio_bin = /path/to/conda/envs/ARPEGGIO/bin/pdbe-arpeggio
+
+## DATABASES
+
+# ENSEMBL cache (requests_cache sqlite, an empty one is created on first use)
+ensembl_sqlite = /path/to/databases/ensembl_cache.sqlite
+# gnomAD exomes VCF (bgzip) with its .tbi index; both r2.0.x (INFO/CSQ) and r2.1.x (INFO/vep) work with the lab VarAlign fork
+gnomad_vcf = /path/to/databases/gnomad.exomes.r2.1.1.sites.vcf.bgz
+# SwissProt fasta (jackhmmer target)
+swissprot = /path/to/databases/uniprot_sprot.fasta
+
+[other]
+
+max_retry = 3
+sleep_time = 0.5
+
+### END OF CONFIG FILE ###

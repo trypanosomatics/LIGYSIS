@@ -1,0 +1,23 @@
+# local configuration (see *.sample)
+ligysis_config.txt
+site.env
+
+# pipeline working data and results
+data/
+logs/
+output_V2/
+__pycache__/
+
+# files ProIntVar creates in the working directory
+prointvar.sqlite
+cath/
+contacts/
+dssp/
+pdbx/
+pfam/
+pickled/
+sifts/
+stamp/
+tmp/
+uniprot/
+.varalign/
