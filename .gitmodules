@@ -1,0 +1,11 @@
+[submodule "vendor/ProIntVar"]
+	path = vendor/ProIntVar
+	url = https://github.com/trypanosomatics/ProIntVar.git
+	branch = main
+[submodule "vendor/SM_VarAlign"]
+	path = vendor/SM_VarAlign
+	url = https://github.com/trypanosomatics/SM_VarAlign.git
+	branch = main
+[submodule "vendor/arpeggio"]
+	path = vendor/arpeggio
+	url = https://github.com/trypanosomatics/arpeggio.git

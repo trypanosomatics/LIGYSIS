@@ -1,0 +1,34 @@
+# Template for ProIntVar-config-load. install.sh substitutes @ENVS_DIR@ and loads it; do not edit the result by hand.
+[Global]
+db_root = .
+db_pdbx = pdbx
+db_sifts = sifts
+db_dssp = dssp
+db_contacts = contacts
+db_pickled = pickled
+db_tmp = tmp
+db_uniprot = uniprot
+db_stamp = stamp
+db_cath = cath
+db_pfam = pfam
+[WebAddresses]
+api_pdbe = http://www.ebi.ac.uk/pdbe/api/
+api_proteins = https://www.ebi.ac.uk/proteins/api/
+api_ensembl = http://rest.ensembl.org/
+http_uniprot = http://www.uniprot.org/uniprot/
+http_pdbe = http://www.ebi.ac.uk/pdbe/
+http_cath = http://www.cathdb.info/version/v4_1_0/
+ftp_sifts = https://ftp.ebi.ac.uk/pub/databases/msd/sifts/xml/
+http_pfam = http://pfam.xfam.org/
+[ThirdPartyTools]
+dssp_bin = @ENVS_DIR@/DSSP/bin/mkdssp
+hbplus_bin = /path/to/hbplus/hbplus
+clean_bin = /path/to/hbplus/clean
+reduce_bin = /path/to/reduce/reduce
+probe_bin = /path/to/probe/probe
+arpeggio_bin = /path/to/arpeggio/arpeggio.py
+python_exe = /path/to/bin/python
+python_path = /path/to/bin/python/lib/site-packages/
+[UserInfo]
+email = username@email.com
+username = username
