@@ -21,3 +21,6 @@ stamp/
 tmp/
 uniprot/
 .varalign/
+
+# editor swap files
+*.swp
