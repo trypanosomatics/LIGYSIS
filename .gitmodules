@@ -9,3 +9,4 @@
 [submodule "vendor/arpeggio"]
 	path = vendor/arpeggio
 	url = https://github.com/trypanosomatics/arpeggio.git
+	ignore = untracked
