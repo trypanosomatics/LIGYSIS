@@ -14,11 +14,8 @@ tracked.
 
 ## Start of session
 
-If these git-excluded files exist, read them first and follow them. They take
-precedence over this file for anything local:
-
-- `RUNBOOK.local.md`
-- `FORKPLAN.md`
+If a git-excluded `CLAUDE.local.md` exists, follow it. It takes precedence over
+this file for anything local.
 
 `docs/` is for user documentation on installing and running this fork.
 
@@ -67,7 +64,7 @@ instead.
 ## Changes
 
 - Before and after any change to `ligysis.py` or the dependencies, run the
-  regression check defined in the local files. Upgrade python, pandas, etc.
+  regression check defined in the local instructions. Upgrade python, pandas, etc.
   only on a branch.
 - Default branch `main`; remotes `origin` = our fork, `upstream` = original.
   Keep upstream-bound fixes small and separate.
