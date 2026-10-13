@@ -244,6 +244,28 @@ def get_segment_membership(supp_data, acc):
                 segment_membership[idx].append(unit_id)
     return segment_membership
 
+def get_segment_chains_df(supp_data, acc, segment, matrices_df):
+    """
+    Returns a dataframe with one row per chain of a structure
+    coverage segment, as listed by the GRAPH-API superposition
+    data, indexed by pdb_id + "_" + struct_asym_id. Chains with
+    a superposition matrix in matrices_df come first, with the
+    matrices_df rows and order; chains without one follow, with
+    matrix set to None, so they are analysed but not superposed.
+    """
+    rows = []
+    for cluster in supp_data.loc[segment, acc]["clusters"]:
+        for member in cluster:
+            rows.append([member["pdb_id"], member["auth_asym_id"], member["struct_asym_id"]])
+    chains_df = pd.DataFrame(rows, columns = ["pdb_id", "auth_asym_id", "struct_asym_id"])
+    chains_df.index = chains_df.pdb_id + "_" + chains_df.struct_asym_id
+    chains_df = chains_df[~chains_df.index.duplicated()]
+
+    with_matrix_df = matrices_df[matrices_df.index.isin(chains_df.index)]
+    no_matrix_df = chains_df[~chains_df.index.isin(matrices_df.index)].copy()
+    no_matrix_df["matrix"] = None
+    return pd.concat([with_matrix_df, no_matrix_df.reindex(columns = with_matrix_df.columns)])
+
 def parse_pdb_file(pdb_path, fmt):
     """
     :param pdb_path:
@@ -453,6 +475,9 @@ def get_simple_pdbs(trans_dir, simple_dir, OVERRIDE_SIMPLE = False):
     save the HETATM records, corresponding to ligands.
     """
     cif_files = [os.path.join(trans_dir, f) for f in os.listdir(trans_dir) if f.endswith("_trans.cif")]
+    if cif_files == []: # no chain was superposed: nothing to simplify
+        log.warning("No transformed structures in {}. No simplified structures written".format(trans_dir))
+        return
     first_simple = os.path.join(simple_dir, os.path.basename(cif_files[0]))
 
     if OVERRIDE_SIMPLE or not os.path.isfile(first_simple):
@@ -1775,14 +1800,15 @@ def main(args):
             log.info("Starting to process Segment {} of {}".format(str(segment), acc))
 
             matrices_df.index = matrices_df.pdb_id + "_" + matrices_df.struct_asym_id # changing index of rows so they represent struct_asym_id which is euvialent to orig_label_asym_id
-            segment_df = matrices_df.query('index in @segment_chains[@segment]') # subsets matrices_df to select segment rows
+            segment_df = get_segment_chains_df(supp_data, acc, segment, matrices_df) # all segment chains from GRAPH-API, with matrix where the FTP file has one
 
             if len(segment_df) == 0: # happened for 8au0 of O94901. Brand new of 19/07/2023.
                 log.warning("Segment {} of {} presents no chains in supp data".format(str(segment), acc))
                 print("{}\t{}".format(seg_id, str(5)), flush = True)
                 continue
 
-            log.info("Segment {} of {} presents {} chains".format(str(segment), acc, str(len(segment_df))))
+            n_matrix_chains = int(segment_df.index.isin(matrices_df.index).sum())
+            log.info("Segment {} of {} presents {} chains, {} of them with a superposition matrix".format(str(segment), acc, str(len(segment_df)), str(n_matrix_chains)))
 
             pdb_ids = segment_df.pdb_id.tolist() # this has to be redundadnt, otherwise won't match number of matrices, etc (multiple chains per pdb_id)
 
@@ -1897,9 +1923,19 @@ def main(args):
             log.info("Segment {} of {} presents {} high quality structures".format(str(segment), acc, str(len(unique_pdbs))))     
 
             segment_df = segment_df.query('pdb_id in @pdb_ids') # filtering segment dataframe, so it only includes transformation data of those tructures present in local copy of PDB
-            matrices = segment_df.matrix.tolist()
-            struct_chains = segment_df.struct_asym_id.tolist() # this is the same as orig_label_asym_id
-            auth_chains = segment_df.auth_asym_id.tolist() # this is the same as orig_auth_asym_id
+
+            ### ONLY CHAINS WITH A SUPERPOSITION MATRIX ARE TRANSFORMED (SUPERPOSED); ALL CHAINS ARE ANALYSED
+
+            trans_df = segment_df[segment_df.index.isin(matrices_df.index)]
+            no_matrix_chains = sorted(segment_df.index[~segment_df.index.isin(matrices_df.index)].tolist())
+            no_matrix_out = os.path.join(results_dir, "{}_{}_{}_{}_no_matrix_pdbs.pkl".format(acc, str(segment), experimental_methods, str(resolution)))
+            dump_pickle(no_matrix_chains, no_matrix_out)
+            if no_matrix_chains:
+                log.warning("{} chains have no superposition matrix for Segment {} of {} and are left out of the superposed outputs: {}".format(len(no_matrix_chains), str(segment), acc, ", ".join(no_matrix_chains)))
+            trans_pdb_ids = trans_df.pdb_id.tolist()
+            matrices = trans_df.matrix.tolist()
+            struct_chains = trans_df.struct_asym_id.tolist() # this is the same as orig_label_asym_id
+            auth_chains = trans_df.auth_asym_id.tolist() # this is the same as orig_auth_asym_id
 
             ### CHECKING PDB IDS AGREE WITH SEGMENT DF PDB IDS
 
@@ -2016,14 +2052,19 @@ def main(args):
 
             asym_cif_files = [os.path.join(ASYM_FOLDER, "{}.cif") for pdb_id in unique_pdbs] # using asymmetric unit just for superposition
 
-            no_trans_pdbs = transform_all_files(pdb_ids, matrices, struct_chains, auth_chains, ASYM_FOLDER, trans_dir, OVERRIDE_TRANS)
+            if trans_pdb_ids == []: # no chain has a superposition matrix: sites are still computed, superposed outputs stay empty
+                log.warning("No chain has a superposition matrix for Segment {} of {}. Superposed outputs will be empty".format(str(segment), acc))
+            else:
+                no_trans_pdbs = transform_all_files(trans_pdb_ids, matrices, struct_chains, auth_chains, ASYM_FOLDER, trans_dir, OVERRIDE_TRANS)
 
-            if no_trans_pdbs == pdb_ids:
-                print("{}\t{}".format(seg_id, str(20)), flush = True)
-                log.warning("None of the structures were transformed for Segment {} of {}".format(str(segment), acc))
-                continue
+                if no_trans_pdbs == trans_pdb_ids:
+                    if no_matrix_chains == []: # as before: no chain left to analyse
+                        print("{}\t{}".format(seg_id, str(20)), flush = True)
+                        log.warning("None of the structures were transformed for Segment {} of {}".format(str(segment), acc))
+                        continue
+                    log.warning("None of the structures with a superposition matrix were transformed for Segment {} of {}. Superposed outputs will be empty".format(str(segment), acc))
 
-            log.info("Structures cleaned and transformed for Segment {} of {}".format(str(segment), acc))
+                log.info("Structures cleaned and transformed for Segment {} of {}".format(str(segment), acc))
 
             ### SIMPLIFYING PDB FILES (1 MODEL PROTEIN COORDINATES + HETATM FOR THE REST OF THEM)
 
