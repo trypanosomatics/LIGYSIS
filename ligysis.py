@@ -28,11 +28,14 @@ from Bio.PDB.MMCIF2Dict import MMCIF2Dict
 from prointvar.pdbx import PDBXreader, PDBXwriter
 from prointvar.dssp import DSSPrunner, DSSPreader
 from prointvar.config import config as cfg
-from prointvar.fetchers import download_structure_from_pdbe
+from prointvar.fetchers import download_structure_from_pdbe, get_preferred_assembly_id
 
 import varalign.align_variants
 import varalign.alignments
 
+import gzip
+import shlex
+import urllib.request
 from urllib.error import HTTPError
 from urllib.error import URLError
 
@@ -550,13 +553,157 @@ def intersection_rel(l1, l2):
     I = len(list(set(l1).intersection(l2)))
     return I/I_max
 
-def download_and_move_files(pdb_ids, asymmetric_dir, bio=False, OVERRIDE_PDB=False, failed=None):
+WWPDB_ASSEMBLY_URL = "https://www.ebi.ac.uk/pdbe/entry-files/download/{}-assembly{}.cif.gz"
+WWPDB_ASSEMBLY_MARK = "# assembly built by LIGYSIS from the wwPDB assembly file"
+
+def _cif_token(value):
+    """
+    Quotes an mmCIF value if it needs it.
+    """
+    if value == "":
+        return "?"
+    if any(c in value for c in " \t'\"") or value[0] in "_#$[];":
+        if '"' not in value: # double quotes, as in PDBe files
+            return '"{}"'.format(value)
+        return "'{}'".format(value)
+    return value
+
+def _read_cif_loop(lines, category):
+    """
+    Returns columns, rows and line span (start, end) of an mmCIF loop
+    whose rows are one per line, as in PDBe and wwPDB assembly files.
+    """
+    columns, rows, start, end = [], [], None, None
+    for i, line in enumerate(lines):
+        if line.startswith(category + "."):
+            if start is None:
+                start = i - 1 if i > 0 and lines[i - 1].startswith("loop_") else i
+            columns.append(line.strip().split(".", 1)[1])
+        elif columns:
+            if line.startswith("#") or line.startswith("_") or line.startswith("loop_"):
+                end = i
+                break
+            rows.append(shlex.split(line))
+    if columns and end is None:
+        end = len(lines)
+    return columns, rows, start, end
+
+def pdbe_style_assembly(wwpdb_cif, out_cif, pdb_id, assembly_id):
+    """
+    Rewrites a wwPDB assembly mmCIF (gzipped, as served by PDBe entry-files)
+    in the layout of the PDBe preferred assembly files used by the rest of
+    the pipeline: copies of a chain made by symmetry operators are named as
+    PDBe names them (A, AA, AB...), the author chain is set to the label
+    chain, atom_site gets pdbe_label_seq_id, orig_label_asym_id and
+    orig_auth_asym_id, and a _pdbe_chain_remapping loop is added.
+    Raises ValueError if the file cannot be converted.
+    """
+    with gzip.open(wwpdb_cif, "rt") as fh:
+        lines = fh.read().split("\n")
+
+    rm_cols, rm_rows, _, _ = _read_cif_loop(lines, "_pdbx_chain_remapping")
+    if not rm_rows:
+        raise ValueError("no _pdbx_chain_remapping loop in {}".format(wwpdb_cif))
+    if any(len(row) != len(rm_cols) for row in rm_rows):
+        raise ValueError("could not parse _pdbx_chain_remapping in {}".format(wwpdb_cif))
+    remapping = [dict(zip(rm_cols, row)) for row in rm_rows]
+    ops = [row["applied_operations"] for row in remapping]
+    if all(op.isdigit() for op in ops):
+        op_order = sorted(set(ops), key = int)
+    else:
+        op_order = []
+        for op in ops: # order of first appearance
+            if op not in op_order:
+                op_order.append(op)
+    if len(op_order) > 27:
+        raise ValueError("{} has {} operators, more than PDBe-style chain names allow".format(wwpdb_cif, len(op_order)))
+
+    new_chain = {} # wwPDB label_asym_id to PDBe-style chain ID
+    orig_auth = {} # wwPDB label_asym_id to original auth_asym_id
+    remap_rows = []
+    for row in remapping:
+        k = op_order.index(row["applied_operations"])
+        name = row["orig_label_asym_id"] + ("" if k == 0 else chr(ord("A") + k - 1))
+        new_chain[row["label_asym_id"]] = name
+        orig_auth[row["label_asym_id"]] = row["orig_auth_asym_id"]
+        remap_rows.append([
+            pdb_id.upper(), str(assembly_id), "1", row["entity_id"], row["orig_auth_asym_id"],
+            name, row["orig_label_asym_id"], name, "_{}".format(row["applied_operations"])
+        ])
+
+    if len(set(new_chain.values())) != len(new_chain):
+        raise ValueError("PDBe-style chain names are not unique for {}".format(wwpdb_cif))
+
+    cols, rows, start, end = _read_cif_loop(lines, "_atom_site")
+    if not rows:
+        raise ValueError("no _atom_site loop in {}".format(wwpdb_cif))
+    if any(len(row) != len(cols) for row in rows):
+        raise ValueError("could not parse _atom_site in {}".format(wwpdb_cif))
+    c = {name: i for i, name in enumerate(cols)}
+    atom_lines = []
+    for row in rows:
+        chain = row[c["label_asym_id"]]
+        if chain not in new_chain:
+            raise ValueError("chain {} of {} is not in _pdbx_chain_remapping".format(chain, wwpdb_cif))
+        row = list(row)
+        row[c["label_asym_id"]] = new_chain[chain]
+        row[c["auth_asym_id"]] = new_chain[chain]
+        seq_id = row[c["label_seq_id"]]
+        pdbe_seq_id = seq_id if seq_id not in (".", "?") else row[c["auth_seq_id"]] # PDBe numbers non-polymers by auth_seq_id
+        row += [pdbe_seq_id, ".", orig_auth[chain]]
+        atom_lines.append(" ".join(_cif_token(v) for v in row))
+    new_cols = cols + ["pdbe_label_seq_id", "orig_label_asym_id", "orig_auth_asym_id"]
+    atom_header = ["loop_"] + ["_atom_site.{}".format(name) for name in new_cols]
+
+    remap_cols = [
+        "source_coordinates", "assembly_id", "model_num", "entity_id", "orig_auth_asym_id",
+        "new_auth_asym_id", "orig_label_asym_id", "new_label_asym_id", "applied_operations"
+    ]
+    remap_lines = ["loop_"] + ["_pdbe_chain_remapping.{}".format(name) for name in remap_cols]
+    remap_lines += [" ".join(_cif_token(v) for v in row) for row in remap_rows]
+
+    new_lines = lines[:1] + [WWPDB_ASSEMBLY_MARK] + lines[1:start] + atom_header + atom_lines + lines[end:]
+    with open(out_cif, "w") as fh:
+        fh.write("\n".join(new_lines).rstrip("\n") + "\n#\n" + "\n".join(remap_lines) + "\n#\n")
+
+def download_wwpdb_assembly(pdb_id, out_cif):
+    """
+    Downloads the wwPDB file of the preferred assembly of a PDB entry from
+    PDBe entry-files and writes it, converted to the PDBe layout, to out_cif.
+    Used when PDBe has no preferred assembly file for the entry, as is the
+    case for many recent entries. Returns the assembly ID. Raises OSError
+    or ValueError on failure.
+    """
+    assembly_id = get_preferred_assembly_id(pdb_id)
+    gz_path = out_cif + ".wwpdb.gz"
+    url = WWPDB_ASSEMBLY_URL.format(pdb_id, assembly_id)
+    try:
+        with urllib.request.urlopen(url, timeout = 300) as response, open(gz_path, "wb") as fh:
+            shutil.copyfileobj(response, fh)
+        pdbe_style_assembly(gz_path, out_cif, pdb_id, assembly_id)
+    finally:
+        if os.path.isfile(gz_path):
+            os.remove(gz_path)
+    return assembly_id
+
+def is_wwpdb_assembly(cif_path):
+    """
+    True if the file was built by download_wwpdb_assembly.
+    """
+    with open(cif_path) as fh:
+        return fh.readline() != "" and fh.readline().rstrip("\n") == WWPDB_ASSEMBLY_MARK
+
+def download_and_move_files(pdb_ids, asymmetric_dir, bio=False, OVERRIDE_PDB=False, failed=None, assembly_fallback=False, force_fallback=False, fallback=None):
     """
     Downloads CIF of a series of PDB IDs and moves
     them to a given directory. If OVERRIDE_PDB is True,
     any existing file will be deleted before the download.
-    PDB IDs whose file cannot be retrieved (e.g., PDBe does not
-    provide assembly files for many recent entries) are skipped and,
+    A failed download is retried once. If assembly_fallback is
+    True, an assembly that PDBe does not provide (the case for many
+    recent entries) is built from the wwPDB assembly file instead,
+    and its PDB ID is appended to fallback, if a list is passed
+    (force_fallback uses the wwPDB file for every assembly; for
+    testing). PDB IDs whose file cannot be retrieved are skipped and,
     if a list is passed as failed, appended to it. Only the paths of
     the files that are available are returned.
     """
@@ -578,16 +725,36 @@ def download_and_move_files(pdb_ids, asymmetric_dir, bio=False, OVERRIDE_PDB=Fal
         
         # If the file does not exist, proceed to download and move
         if not file_exists:
-            try:
-                download_structure_from_pdbe(pdb_id, bio=bio)
-                shutil.move(cif_in, cif_out)
-            except (OSError, shutil.Error) as e: # ProIntVar fails silently on HTTP errors, and then crashes when decompressing the missing file
-                log.warning("Could not retrieve {} for {}: {}".format("assembly" if bio else "CIF", pdb_id, e))
+            error = None
+            if not (bio and force_fallback):
+                for attempt in range(2):
+                    try:
+                        download_structure_from_pdbe(pdb_id, bio=bio)
+                        shutil.move(cif_in, cif_out)
+                        error = None
+                        break
+                    except (OSError, shutil.Error) as e: # ProIntVar fails silently on HTTP errors, and then crashes when decompressing the missing file
+                        error = e
+                        if attempt == 0:
+                            time.sleep(5)
+            if bio and (force_fallback or (error is not None and assembly_fallback)):
+                try:
+                    assembly_id = download_wwpdb_assembly(pdb_id, cif_out)
+                    log.info("Assembly {} of {} built from the wwPDB assembly file".format(assembly_id, pdb_id))
+                    if fallback is not None:
+                        fallback.append(pdb_id)
+                    error = None
+                except (OSError, ValueError) as e: # HTTPError and URLError are OSErrors
+                    error = e
+            if error is not None:
+                log.warning("Could not retrieve {} for {}: {}".format("assembly" if bio else "CIF", pdb_id, error))
                 if failed is not None:
                     failed.append(pdb_id)
                 continue
         else:
             log.debug(f"{cif_out} already exists!")
+            if bio and fallback is not None and is_wwpdb_assembly(cif_out):
+                fallback.append(pdb_id)
         
         cifs.append(cif_out)
     return cifs
@@ -1691,6 +1858,8 @@ def main(args):
     OVERRIDE_TRANS = args.override_trans
     OVERRIDE_SIMPLE = args.override_simple
     OVERRIDE_DSSP = args.override_dssp
+    ASSEMBLY_FALLBACK = args.assembly_fallback or args.force_assembly_fallback
+    FORCE_ASSEMBLY_FALLBACK = args.force_assembly_fallback
     
 
     ### RETRIEVES ALL SUPERPOSITION MATRICES FOR PDB IDS IN acc, EXCEPT IF THERE ARE NOT ANY SOLVED STRUCTURES
@@ -1905,11 +2074,19 @@ def main(args):
             ### REMOVING STRUCTURES FOR WHICH PDBe DOES NOT PROVIDE THE ASSEMBLY (OR CIF) FILE. THIS IS THE CASE FOR MANY RECENT ENTRIES.
 
             no_file_pdbs = []
+            fallback_pdbs = []
             for dl_dir, dl_bio in [(ASSEMBLY_FOLDER, True), (ASYM_FOLDER, False)]:
-                download_and_move_files(sorted(set(pdb_ids)), dl_dir, bio = dl_bio, OVERRIDE_PDB = OVERRIDE_PDB, failed = no_file_pdbs)
+                download_and_move_files(
+                    sorted(set(pdb_ids)), dl_dir, bio = dl_bio, OVERRIDE_PDB = OVERRIDE_PDB, failed = no_file_pdbs,
+                    assembly_fallback = ASSEMBLY_FALLBACK, force_fallback = FORCE_ASSEMBLY_FALLBACK, fallback = fallback_pdbs
+                )
             no_file_pdbs = sorted(set(no_file_pdbs))
             no_file_out = os.path.join(results_dir, "{}_{}_{}_{}_no_file_pdbs.pkl".format(acc, str(segment), experimental_methods, str(resolution)))
             dump_pickle(no_file_pdbs, no_file_out)
+            fallback_out = os.path.join(results_dir, "{}_{}_{}_{}_wwpdb_assembly_pdbs.pkl".format(acc, str(segment), experimental_methods, str(resolution)))
+            dump_pickle(sorted(set(fallback_pdbs)), fallback_out)
+            if fallback_pdbs:
+                log.info("{} assemblies were built from wwPDB assembly files for Segment {} of {}: {}".format(len(fallback_pdbs), str(segment), acc, ", ".join(sorted(set(fallback_pdbs)))))
             if no_file_pdbs:
                 log.warning("{} structures were excluded for Segment {} of {} because PDBe did not provide their assembly or CIF file: {}".format(len(no_file_pdbs), str(segment), acc, ", ".join(no_file_pdbs)))
                 pdb_ids = [pdb_id for pdb_id in pdb_ids if pdb_id not in no_file_pdbs]
@@ -2486,6 +2663,8 @@ if __name__ == '__main__': ### command to run form command line: python3.6 frags
     parser.add_argument("--override_simple", help = "Override any previously generated files (ONLY CIF SIMPLIFICATION).", action = "store_true")
     parser.add_argument("--override_dssp", help = "Override any previously generated files (ONLY DSSP SECTION).", action = "store_true")
     parser.add_argument("--override_pdb", help = "Override MMCIF ASYM and BIO downloads.", action = "store_true")
+    parser.add_argument("--assembly_fallback", help = "If PDBe has no preferred assembly file for an entry, build it from the wwPDB assembly file instead of skipping the entry.", action = "store_true")
+    parser.add_argument("--force_assembly_fallback", help = "Build every assembly from the wwPDB assembly file (for testing the fallback).", action = "store_true")
     args = parser.parse_args()
 
     
