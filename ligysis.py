@@ -2195,7 +2195,7 @@ def main(args):
 
             ### CLUSTERING LIGANDS INTO BINDING SITES
 
-            lig_fps_filt2_sifted = lig_fps # skipping all filtering as done internally. IT SHOULD WORK FROM HERE ON, once edited the functions to accommodate for key differences in dictionaroes
+            lig_fps_filt2_sifted = {k: lig_fps[k] for k in sorted(lig_fps)} # sort ligand fingerprints by key so the clustering input order is canonical and run-independent (otherwise tied merges split sites differently between runs)
 
             lig_sifted_inters = get_inters(lig_fps_filt2_sifted)
             lig_sifted_inters = [sorted(list(set(i))) for i in lig_sifted_inters] # making sure each residue is present only once (O00214 problematic with saccharides)
