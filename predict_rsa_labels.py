@@ -7,6 +7,16 @@ import pandas as pd
 from tensorflow import keras
 import argparse
 
+### CONSTANTS
+
+# Binding-site size is normalised by this fixed denominator before it is fed to
+# the RSA model, instead of by the largest site in the current run. A fixed
+# value keeps a site's size feature independent of what else happens to be
+# scored in the same batch (the per-run maximum made the same site score
+# differently depending on its neighbours). The value is the global maximum
+# binding-site size of the reference whole-PDB build.
+GLOBAL_MAX_SITE_SIZE = 87
+
 ### FUNCTIONS
 
 ###### AUXILIARY FUNCTIONS
@@ -25,7 +35,6 @@ def get_RSA_vectors(rsa_profs_filt):
     generates a dataframe of RSA vectors representing
     a binding site.
     """
-    max_len = max([len(v) for v in rsa_profs_filt.values()])
     bs_vectors = []
     bs_vectors_dict = {}
     for bs_id, rsa_sig in rsa_profs_filt.items():
@@ -37,7 +46,7 @@ def get_RSA_vectors(rsa_profs_filt):
                 prop_i = 9
             rsa_range_prop[prop_i] += 1
         rsa_range_prop = [round(i / rsa_sig_len, 3) for i in rsa_range_prop]
-        rsa_range_prop.insert(0, rsa_sig_len / max_len)  # ADDING BINDING SITE SIZE RELATIVE TO MAX SITE SIZE (IN THIS CASE 40)
+        rsa_range_prop.insert(0, rsa_sig_len / GLOBAL_MAX_SITE_SIZE)  # binding-site size relative to the global max site size (fixed, batch-independent)
         bs_vectors.append(rsa_range_prop)
         bs_vectors_dict[bs_id] = rsa_range_prop
 
